@@ -7,6 +7,8 @@
 //! to [`new_rating`](fn.new_rating.html) to calculate the new rating for that team or player, which can be saved in place of the old one.
 //! This process is then repeated each rating period.
 
+use std::{error::Error, fmt};
+
 const CONVERGENCE_TOLERANCE: f64 = 0.000001;
 
 /// Represents the rating of a player or team on the Glicko2 scale.
@@ -163,7 +165,8 @@ fn f(x: f64, delta: f64, rating_deviation: f64, v: f64, volatility: f64, sys_con
     let fraction_one = {
         let numer =
             x.exp() * ((delta * delta) - (rating_deviation * rating_deviation) - v - x.exp());
-        let denom = 2.0 * (rating_deviation * rating_deviation + v + x.exp())
+        let denom = 2.0
+            * (rating_deviation * rating_deviation + v + x.exp())
             * (rating_deviation * rating_deviation + v + x.exp());
         numer / denom
     };
@@ -174,6 +177,18 @@ fn f(x: f64, delta: f64, rating_deviation: f64, v: f64, volatility: f64, sys_con
     };
     fraction_one - fraction_two
 }
+
+/// Glicko2 algorithm failed to converge when calculating new rating.
+#[derive(Debug)]
+pub struct ConvergenceFailure;
+
+impl fmt::Display for ConvergenceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("failed to converge")
+    }
+}
+
+impl Error for ConvergenceFailure {}
 
 /// Calculates a new rating from an existing rating and a series of results.
 ///
@@ -198,38 +213,37 @@ pub fn new_rating(
     prior_rating: Glicko2Rating,
     results: &[GameResult],
     sys_constant: f64,
-) -> Glicko2Rating {
+) -> Result<Glicko2Rating, ConvergenceFailure> {
     if !results.is_empty() {
         let v: f64 = {
             results
                 .iter()
                 .fold(0.0, |acc, result| {
-                    acc
-                        + g(result.opponent_rating_deviation) * g(result.opponent_rating_deviation)
-                            * e(
-                                prior_rating.value,
-                                result.opponent_rating_value,
-                                result.opponent_rating_deviation,
-                            )
-                            * (1.0
-                                - e(
-                                    prior_rating.value,
-                                    result.opponent_rating_value,
-                                    result.opponent_rating_deviation,
-                                ))
-                })
-                .recip()
-        };
-        let delta = {
-            v * results.iter().fold(0.0, |acc, result| {
-                acc
-                    + g(result.opponent_rating_deviation)
-                        * (result.score
+                    acc + g(result.opponent_rating_deviation)
+                        * g(result.opponent_rating_deviation)
+                        * e(
+                            prior_rating.value,
+                            result.opponent_rating_value,
+                            result.opponent_rating_deviation,
+                        )
+                        * (1.0
                             - e(
                                 prior_rating.value,
                                 result.opponent_rating_value,
                                 result.opponent_rating_deviation,
                             ))
+                })
+                .recip()
+        };
+        let delta = {
+            v * results.iter().fold(0.0, |acc, result| {
+                acc + g(result.opponent_rating_deviation)
+                    * (result.score
+                        - e(
+                            prior_rating.value,
+                            result.opponent_rating_value,
+                            result.opponent_rating_deviation,
+                        ))
             })
         };
         let new_volatility = {
@@ -269,7 +283,13 @@ pub fn new_rating(
                 prior_rating.volatility,
                 sys_constant,
             );
+            let mut iterations = 0;
             while (b - a).abs() > CONVERGENCE_TOLERANCE {
+                iterations += 1;
+                if iterations > 10000 {
+                    return Err(ConvergenceFailure);
+                }
+
                 // a
                 let c = a + ((a - b) * fa / (fb - fa));
                 let fc = f(
@@ -303,31 +323,32 @@ pub fn new_rating(
             (subexpr_1 + subexpr_2).sqrt().recip()
         };
         let new_rating = {
-            prior_rating.value + ((new_rd * new_rd) * results.iter().fold(0.0, |acc, &result| {
-                acc
-                    + g(result.opponent_rating_deviation)
-                        * (result.score
-                            - e(
-                                prior_rating.value,
-                                result.opponent_rating_value,
-                                result.opponent_rating_deviation,
-                            ))
-            }))
+            prior_rating.value
+                + ((new_rd * new_rd)
+                    * results.iter().fold(0.0, |acc, &result| {
+                        acc + g(result.opponent_rating_deviation)
+                            * (result.score
+                                - e(
+                                    prior_rating.value,
+                                    result.opponent_rating_value,
+                                    result.opponent_rating_deviation,
+                                ))
+                    }))
         };
-        Glicko2Rating {
+        Ok(Glicko2Rating {
             value: new_rating,
             deviation: new_rd,
             volatility: new_volatility,
-        }
+        })
     } else {
         let new_rd = ((prior_rating.deviation * prior_rating.deviation)
             + (prior_rating.volatility * prior_rating.volatility))
             .sqrt();
-        Glicko2Rating {
+        Ok(Glicko2Rating {
             value: prior_rating.value,
             deviation: new_rd,
             volatility: prior_rating.volatility,
-        }
+        })
     }
 }
 
@@ -357,10 +378,16 @@ mod tests {
             deviation: 300.0,
         }));
 
-        let new_rating = new_rating(example_player_rating, &results, 0.5);
-        assert!(Relative::default().epsilon(0.0001).eq(&new_rating.value, &-0.2069));
-        assert!(Relative::default().epsilon(0.0001).eq(&new_rating.deviation, &0.8722));
-        assert!(Relative::default().epsilon(0.0001).eq(&new_rating.volatility, &0.05999))
+        let new_rating = new_rating(example_player_rating, &results, 0.5).unwrap();
+        assert!(Relative::default()
+            .epsilon(0.0001)
+            .eq(&new_rating.value, &-0.2069));
+        assert!(Relative::default()
+            .epsilon(0.0001)
+            .eq(&new_rating.deviation, &0.8722));
+        assert!(Relative::default()
+            .epsilon(0.0001)
+            .eq(&new_rating.volatility, &0.05999))
     }
 
     #[test]
@@ -371,12 +398,22 @@ mod tests {
         };
 
         let glicko2_rating = Glicko2Rating::from(example_player);
-        assert!(Relative::default().epsilon(0.0001).eq(&glicko2_rating.value, &0.0));
-        assert!(Relative::default().epsilon(0.0001).eq(&glicko2_rating.deviation, &1.1513));
-        assert!(Relative::default().epsilon(0.0001).eq(&glicko2_rating.volatility, &0.06));
+        assert!(Relative::default()
+            .epsilon(0.0001)
+            .eq(&glicko2_rating.value, &0.0));
+        assert!(Relative::default()
+            .epsilon(0.0001)
+            .eq(&glicko2_rating.deviation, &1.1513));
+        assert!(Relative::default()
+            .epsilon(0.0001)
+            .eq(&glicko2_rating.volatility, &0.06));
 
         let glicko_rating = GlickoRating::from(glicko2_rating);
-        assert!(Relative::default().epsilon(0.0001).eq(&glicko_rating.value, &1500.0));
-        assert!(Relative::default().epsilon(0.0001).eq(&glicko_rating.deviation, &200.0));
+        assert!(Relative::default()
+            .epsilon(0.0001)
+            .eq(&glicko_rating.value, &1500.0));
+        assert!(Relative::default()
+            .epsilon(0.0001)
+            .eq(&glicko_rating.deviation, &200.0));
     }
 }

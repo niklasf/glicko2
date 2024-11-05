@@ -24,10 +24,11 @@ fn main() {
     // benefits of Glicko2 over Glicko for the sake of matching the example in the glicko2 pdf.
     // In a real application, you'd likely want to save the Glicko2Rating and convert to
     // GlickoRating for display purposes only.
-    let new_rating: GlickoRating = glicko2::new_rating(example_rating.into(), &results, 0.5).into();
+    let new_rating: GlickoRating = glicko2::new_rating(example_rating.into(), &results, 0.5)
+        .unwrap()
+        .into();
     println!(
         "New rating value: {} New rating deviation: {}",
-        new_rating.value,
-        new_rating.deviation
+        new_rating.value, new_rating.deviation
     );
 }
